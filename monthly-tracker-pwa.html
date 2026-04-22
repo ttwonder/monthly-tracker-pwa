@@ -1,0 +1,1521 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>月度進度報告與項目追蹤</title>
+  
+  <!-- PWA Meta Tags (支援手機加到主畫面) -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="進度追蹤">
+  <meta name="theme-color" content="#f3f4f6">
+  <link rel="manifest" id="manifest-link">
+
+  <!-- React & Babel -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- SheetJS (Excel) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  
+  <!-- Supabase JS Client -->
+  <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+
+  <style>
+    body { font-family: 'Inter', system-ui, -apple-system, sans-serif; background-color: #f3f4f6; -webkit-tap-highlight-color: transparent; }
+    .a4-page {
+      max-width: 210mm;
+      min-height: 297mm;
+      margin: 0 auto;
+      background: white;
+      padding: 12mm 10mm; 
+      box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+    }
+    textarea { resize: none; overflow: hidden; min-height: 24px; }
+    textarea.resize-y { resize: vertical !important; }
+    textarea:focus, input:focus, select:focus { outline: none; border-color: #2563eb; background-color: #f0fdfa; }
+    input[type="range"] { accent-color: #16a34a; -webkit-appearance: none; appearance: none; border-radius: 999px; }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none; width: 12px; height: 12px; border-radius: 50%; background: #15803d; cursor: pointer; border: 2px solid white; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 12px; height: 12px; border-radius: 50%; background: #15803d; cursor: pointer; border: 2px solid white; box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    /* PWA Install Prompt Animation */
+    @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+    .animate-slide-up { animation: slideUp 0.3s ease-out forwards; }
+    
+    @media print {
+      html, body { background-color: white; height: auto !important; margin: 0; padding: 0; }
+      .a4-page { box-shadow: none; margin: 0; padding: 0; max-width: 100%; min-height: auto !important; height: auto !important; }
+      .no-print { display: none !important; }
+      textarea, input, select { border: none !important; background: transparent !important; appearance: none; -webkit-appearance: none; padding: 0 !important; margin: 0 !important; resize: none !important; }
+      .print-border { border: 1px solid #e5e7eb !important; page-break-inside: avoid; break-inside: avoid; }
+      tr, .avoid-break { page-break-inside: avoid; break-inside: avoid; }
+      .rounded-sm { page-break-after: avoid; break-after: avoid; }
+    }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    .item-highlight { transition: background-color 1.5s ease-out; }
+  </style>
+
+  <!-- PWA 動態腳本注入 -->
+  <script>
+    // 1. 動態生成並注入 PWA Manifest
+    const manifest = {
+      "name": "月度進度追蹤系統",
+      "short_name": "進度追蹤",
+      "start_url": ".",
+      "display": "standalone",
+      "background_color": "#f3f4f6",
+      "theme_color": "#f3f4f6",
+      "description": "跨平台的進度追蹤與專案管理工具",
+      "icons": [
+        {
+          "src": "https://cdn-icons-png.flaticon.com/512/1055/1055672.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        },
+        {
+          "src": "https://cdn-icons-png.flaticon.com/512/1055/1055672.png",
+          "sizes": "512x512",
+          "type": "image/png"
+        }
+      ]
+    };
+    const manifestString = JSON.stringify(manifest);
+    document.getElementById('manifest-link').setAttribute('href', 'data:application/manifest+json;charset=utf-8,' + encodeURIComponent(manifestString));
+
+    // 2. 動態註冊 Service Worker (PWA 離線支援必備)
+    const swCode = `
+      const CACHE_NAME = 'progress-app-v1';
+      self.addEventListener('install', (e) => { self.skipWaiting(); });
+      self.addEventListener('activate', (e) => { self.clients.claim(); });
+      self.addEventListener('fetch', (e) => {
+        if (e.request.url.includes('supabase.co')) { return; }
+        e.respondWith(
+          fetch(e.request).catch(() => caches.match(e.request))
+        );
+      });
+    `;
+    const swBlob = new Blob([swCode], { type: 'application/javascript' });
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register(URL.createObjectURL(swBlob)).catch(err => console.log('SW Setup Failed', err));
+      });
+    }
+  </script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    const generateId = () => Math.random().toString(36).substring(2, 9);
+    
+    const getToday = () => {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+
+    const DEPARTMENTS = ["督導", "船員組", "安衛處", "海技組", "航運組", "資材組", "船工處", "管理處", "外部資源"];
+    
+    const PRIORITIES = [
+      { level: '急迫', color: 'bg-red-100 text-red-800 border-red-300', weight: 5 },
+      { level: '臨時', color: 'bg-orange-100 text-orange-800 border-orange-300', weight: 4 },
+      { level: '高', color: 'bg-yellow-100 text-yellow-800 border-yellow-400', weight: 3 },
+      { level: '中', color: 'bg-blue-100 text-blue-800 border-blue-300', weight: 2 },
+      { level: '低', color: 'bg-gray-100 text-gray-800 border-gray-300', weight: 1 },
+    ];
+
+    const DEFAULT_DATA = {
+      reportDate: getToday(),
+      reporterName: "王小明",
+      projects: [
+        { id: generateId(), name: "船員排班系統優化", desc: "改善現有排班邏輯，減少衝突", priority: "高", progress: 60, lastStatus: "已完成需求訪談", nextPlan: "進行系統架構設計", estDate: "2026-05-30", depts: ["船員組", "管理處"], expanded: false, collaborators: "張三, 李四", standard: "符合勞基法工時限制與排班公平性", notes: "需特別注意特休轉換", issues: "部門間對排班規則認知不一致", purpose: "提升排班效率 30%", actualCompletedDate: "" }
+      ],
+      routines: [
+        { id: generateId(), name: "每週安全會議", desc: "召集各部門安全宣導", priority: "中", status: "持續進行", depts: ["安衛處", "督導"], expanded: false, review: "本月參與率達 95%，無重大安全事故。", isCompleted: false, actualCompletedDate: "" }
+      ],
+      growths: [
+        { id: generateId(), targetPerson: "陳大文", direction: "高級海技員", recentPlan: "參加模擬器進階培訓", lastEffect: "已通過初步測驗", adjustment: "增加實機操作時數", expanded: false, isCompleted: false, actualCompletedDate: "" }
+      ],
+      reflections: [
+        { id: generateId(), keyword: "溝通效率", explanation: "跨部門溝通時常有資訊落差", adjustment: "建立跨部門共用的進度追蹤表", expanded: false, isCompleted: false, actualCompletedDate: "" }
+      ],
+      todos: [
+        { id: generateId(), name: "準備季度報表", desc: "整理各部門運營數據與績效", priority: "中", progress: 0, lastStatus: "數據收集完成，等待航運組確認", depts: ["管理處", "航運組"], estDate: "2026-05-15", collaborators: "李四", notes: "需提前三天交初稿審核", expanded: false, actualCompletedDate: "" }
+      ]
+    };
+
+    const AutoGrowTextarea = ({ value, onChange, placeholder, className }) => {
+      const ref = useRef(null);
+      useEffect(() => {
+        if (ref.current) {
+          ref.current.style.height = 'auto';
+          ref.current.style.height = ref.current.scrollHeight + 'px';
+        }
+      }, [value]);
+      return (
+        <textarea
+          ref={ref} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+          className={`w-full bg-transparent border-b border-dashed border-gray-300 focus:border-solid hover:bg-gray-50 transition-colors p-0.5 text-xs ${className}`}
+          rows={1}
+        />
+      );
+    };
+
+    const EditableInput = ({ value, onChange, placeholder, type="text", className }) => (
+      <input
+        type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        className={`bg-transparent border-b border-dashed border-gray-300 focus:border-solid hover:bg-gray-50 transition-colors p-0.5 text-xs ${className}`}
+      />
+    );
+
+    const MultiSelectDropdown = ({ options, selected, onChange, placeholder = "選擇部門..." }) => {
+      const [isOpen, setIsOpen] = useState(false);
+      const toggleDept = (dept) => {
+        if (selected.includes(dept)) onChange(selected.filter(d => d !== dept));
+        else onChange([...selected, dept]);
+      };
+      return (
+        <div className="relative group/dropdown" onMouseLeave={() => setIsOpen(false)}>
+          <div 
+            className="w-full text-[10px] sm:text-xs border border-gray-300 rounded px-1 py-0.5 cursor-pointer bg-white flex flex-wrap gap-1 min-h-[22px] items-center"
+            onMouseEnter={() => setIsOpen(true)}
+          >
+            {selected.length === 0 ? <span className="text-gray-400">{placeholder}</span> : 
+              selected.map(s => <span key={s} className="bg-blue-100 text-blue-800 px-1 rounded leading-none py-0.5 text-[10px]">{s}</span>)
+            }
+          </div>
+          <div className={`absolute z-50 left-0 top-full pt-2 w-48 no-print transition-opacity ${isOpen ? 'opacity-100 visible' : 'opacity-0 invisible'}`}>
+            <div className="bg-white border border-gray-200 shadow-xl rounded p-1 grid grid-cols-2 gap-1 relative before:absolute before:top-[-8px] before:left-0 before:w-full before:h-[8px] before:bg-transparent">
+              {options.map(opt => (
+                <label key={opt} className="flex items-center gap-1 text-[10px] cursor-pointer hover:bg-gray-100 p-1 rounded">
+                  <input type="checkbox" checked={selected.includes(opt)} onChange={() => toggleDept(opt)} className="accent-blue-600"/>
+                  {opt}
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const PriorityDropdown = ({ selected, onChange }) => {
+      const [isOpen, setIsOpen] = useState(false);
+      const currentP = PRIORITIES.find(p => p.level === selected) || PRIORITIES[3];
+      return (
+        <div className="relative" onMouseLeave={() => setIsOpen(false)}>
+          <div
+            className={`text-[10px] px-1.5 py-0.5 rounded cursor-pointer border outline-none font-bold flex items-center justify-between min-w-[45px] transition ${currentP.color}`}
+            onMouseEnter={() => setIsOpen(true)}
+          >
+            <span>{selected}</span>
+            <svg className="w-3 h-3 ml-1 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+          </div>
+          <div className={`absolute z-50 left-0 top-full pt-2 w-[60px] no-print transition-opacity ${isOpen ? 'opacity-100 visible' : 'opacity-0 invisible'}`}>
+            <div className="bg-white border border-gray-200 shadow-xl rounded py-1 flex flex-col gap-1 relative before:absolute before:top-[-8px] before:left-0 before:w-full before:h-[8px] before:bg-transparent">
+              {PRIORITIES.map(p => (
+                <div
+                  key={p.level}
+                  onClick={() => { onChange(p.level); setIsOpen(false); }}
+                  className={`text-[10px] px-1 py-1 mx-1 rounded cursor-pointer font-bold text-center border ${p.color} hover:brightness-95 transition-all`}
+                >
+                  {p.level}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const App = () => {
+      const [data, setData] = useState(() => {
+        try {
+          const savedData = localStorage.getItem('monthlyReportData');
+          if (savedData) {
+            const parsed = JSON.parse(savedData);
+            if (!parsed.todos) parsed.todos = []; // 兼容舊數據
+            return parsed;
+          }
+        } catch (e) { console.error("無法讀取本地記錄", e); }
+        return DEFAULT_DATA;
+      });
+
+      // Supabase Config State (NEW)
+      const [supabaseConfig, setSupabaseConfig] = useState({ url: '', key: '', syncId: '' });
+      const [showSettings, setShowSettings] = useState(false);
+      const [syncStatus, setSyncStatus] = useState('offline'); // offline, syncing, synced, error
+      const [isDataLoaded, setIsDataLoaded] = useState(false);
+
+      const [activeTab, setActiveTab] = useState('progress');
+      const [toast, setToast] = useState(null);
+      
+      const [sortOrder, setSortOrder] = useState('desc');
+      const [filterPriority, setFilterPriority] = useState('all');
+
+      // 待辦細案清單變數
+      const [todoSortOrder, setTodoSortOrder] = useState('desc');
+      const [todoFilterPriority, setTodoFilterPriority] = useState('all');
+      const [todoFilterDept, setTodoFilterDept] = useState('all');
+
+      // 總清單專用變數
+      const [ovPriority, setOvPriority] = useState([]);
+      const [ovDepts, setOvDepts] = useState([]);
+      const [ovSearch, setOvSearch] = useState('');
+      const [ovSort, setOvSort] = useState('desc');
+      const [ovStatus, setOvStatus] = useState('all'); // all | active | completed
+      const [ovExpanded, setOvExpanded] = useState({});
+
+      // 確認完成日期彈窗
+      const [completingItem, setCompletingItem] = useState(null);
+      const [completingDate, setCompletingDate] = useState(getToday());
+
+      // 讀取設定與本地資料
+      useEffect(() => {
+        try {
+          const savedConfig = localStorage.getItem('supabaseConfig');
+          if (savedConfig) setSupabaseConfig(JSON.parse(savedConfig));
+        } catch (e) { console.error("無法讀取雲端設定", e); }
+        setIsDataLoaded(true);
+      }, []);
+
+      // 取得 Supabase 實例
+      const getSupabase = useCallback(() => {
+        if (!supabaseConfig.url || !supabaseConfig.key) return null;
+        try {
+          return window.supabase.createClient(supabaseConfig.url, supabaseConfig.key);
+        } catch (e) { return null; }
+      }, [supabaseConfig]);
+
+      // 自動儲存至 LocalStorage 與 Supabase
+      useEffect(() => {
+        if (!isDataLoaded) return;
+        localStorage.setItem('monthlyReportData', JSON.stringify(data));
+
+        const sb = getSupabase();
+        if (sb && supabaseConfig.syncId) {
+          setSyncStatus('syncing');
+          const timeoutId = setTimeout(async () => {
+            try {
+              const { error } = await sb.from('sync_data').upsert({ 
+                id: supabaseConfig.syncId, 
+                json_data: data 
+              });
+              if (error) throw error;
+              setSyncStatus('synced');
+            } catch (err) {
+              console.error("Sync error:", err);
+              setSyncStatus('error');
+            }
+          }, 2000); // 2秒防抖
+          return () => clearTimeout(timeoutId);
+        }
+      }, [data, isDataLoaded, getSupabase, supabaseConfig.syncId]);
+
+      const manualCloudLoad = async () => {
+        const sb = getSupabase();
+        if (!sb || !supabaseConfig.syncId) return showToast("請先完成 Supabase 設定", "error");
+        
+        setSyncStatus('syncing');
+        showToast("正在從雲端下載資料...");
+        try {
+          const { data: remoteData, error } = await sb.from('sync_data').select('json_data').eq('id', supabaseConfig.syncId).single();
+          if (error) throw error;
+          
+          if (remoteData && remoteData.json_data) {
+            setData(remoteData.json_data);
+            showToast("雲端同步成功！");
+            setSyncStatus('synced');
+          } else {
+            showToast("雲端無資料，將使用本地資料", "error");
+            setSyncStatus('error');
+          }
+        } catch (err) {
+          console.error(err);
+          showToast("下載失敗，請檢查設定或網路", "error");
+          setSyncStatus('error');
+        }
+      };
+
+      const saveSupabaseConfig = () => {
+        localStorage.setItem('supabaseConfig', JSON.stringify(supabaseConfig));
+        setShowSettings(false);
+        showToast("雲端設定已儲存");
+        manualCloudLoad(); 
+      };
+
+      const showToast = (msg, type='success') => {
+        setToast({ msg, type });
+        setTimeout(() => setToast(null), 3000);
+      };
+
+      const updateData = (key, value) => setData(prev => ({ ...prev, [key]: value }));
+      const updateItem = (listName, id, field, value) => {
+        const newList = data[listName].map(item => item.id === id ? { ...item, [field]: value } : item);
+        updateData(listName, newList);
+      };
+      
+      const addItem = (listName, newItem) => updateData(listName, [...data[listName], { id: generateId(), expanded: true, ...newItem }]);
+      const deleteItem = (listName, id) => updateData(listName, data[listName].filter(item => item.id !== id));
+
+      // 觸發完成視窗
+      const handleCompleteClick = (listName, id, field, value) => {
+        setCompletingItem({ listName, id, field, value });
+        setCompletingDate(getToday());
+      };
+
+      // 確認完成並寫入實際完成日期
+      const confirmComplete = () => {
+        if (!completingItem) return;
+        const { listName, id, field, value } = completingItem;
+        const newList = data[listName].map(item => 
+          item.id === id ? { ...item, [field]: value, actualCompletedDate: completingDate } : item
+        );
+        updateData(listName, newList);
+        setCompletingItem(null);
+        showToast("已標記為完成！");
+      };
+
+      const toggleOvExpand = (e, id) => {
+        e.stopPropagation();
+        setOvExpanded(prev => ({ ...prev, [id]: !prev[id] }));
+      };
+
+      const getRemainingText = (dateStr) => {
+        if (!dateStr) return "";
+        const target = new Date(dateStr);
+        const today = new Date();
+        target.setHours(0,0,0,0);
+        today.setHours(0,0,0,0);
+        const diffDays = Math.ceil((target - today) / (1000 * 60 * 60 * 24));
+        if (diffDays < 0) return `(已逾期 ${Math.abs(diffDays)} 天)`;
+        if (diffDays === 0) return `(今日到期)`;
+        return `(剩餘 ${diffDays} 天)`;
+      };
+
+      const handleExport = () => {
+        try {
+          const wb = XLSX.utils.book_new();
+          const formatProjects = (list) => list.map(p => ({
+            "項目名稱": p.name, "項目描述": p.desc, "重要程度": p.priority, "進度(%)": p.progress,
+            "目前執行狀態": p.lastStatus, "下月計劃": p.nextPlan, "預期完成時間": p.estDate, "實際完成日期": p.actualCompletedDate || "",
+            "涉及部門": p.depts.join(", "), "協同人員": p.collaborators, "目的預期": p.purpose, "執行標準": p.standard, "備註": p.notes, "執行難點": p.issues
+          }));
+
+          const activeList = data.projects.filter(p => p.progress < 100);
+          const completedList = data.projects.filter(p => p.progress === 100);
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(formatProjects(activeList)), "進行中項目");
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(formatProjects(completedList)), "已完成重點項目");
+          
+          const routineList = data.routines.map(r => ({"事務名稱": r.name, "重要程度": r.priority || "中", "描述": r.desc, "目前執行狀態": r.status, "涉及部門": (r.depts||[]).join(", "), "回顧總結": r.review, "是否已歸檔": r.isCompleted ? "是" : "否", "實際歸檔日期": r.actualCompletedDate || ""}));
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(routineList), "常規項目");
+          
+          const growthList = data.growths.map(g => ({"意向人員": g.targetPerson, "階段目標": g.direction, "近期計劃": g.recentPlan, "目前狀態": g.lastEffect, "調整方向": g.adjustment, "是否已歸檔": g.isCompleted ? "是" : "否", "實際歸檔日期": g.actualCompletedDate || ""}));
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(growthList), "成員成長");
+          
+          const reflectionList = data.reflections.map(r => ({"關鍵詞": r.keyword, "解釋": r.explanation, "調整方向": r.adjustment, "是否已歸檔": r.isCompleted ? "是" : "否", "實際歸檔日期": r.actualCompletedDate || ""}));
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(reflectionList), "自省總結");
+
+          const activeTodos = data.todos.filter(t => t.progress < 100);
+          const completedTodos = data.todos.filter(t => t.progress === 100);
+          const formatTodos = (list) => list.map(t => ({ "案子名稱": t.name, "簡述": t.desc, "重要程度": t.priority, "進度(%)": t.progress, "最新狀態": t.lastStatus, "涉及部門": t.depts.join(", "), "預期完成時間": t.estDate, "實際完成日期": t.actualCompletedDate || "", "協作人員": t.collaborators, "備註": t.notes }));
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(formatTodos(activeTodos)), "進行中待辦細案");
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(formatTodos(completedTodos)), "已完成待辦細案");
+
+          XLSX.writeFile(wb, `月度進度報告_${data.reportDate}.xlsx`);
+          showToast("Excel 匯出成功！");
+        } catch (err) {
+          console.error(err);
+          showToast("匯出失敗，請檢查資料", "error");
+        }
+      };
+
+      const handleImport = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          try {
+            const bstr = evt.target.result;
+            const wb = XLSX.read(bstr, { type: 'binary' });
+
+            const parseProjectRow = (p) => ({
+                id: generateId(), name: p["項目名稱"] || "", desc: p["項目描述"] || "", priority: p["重要程度"] || "中",
+                progress: parseInt(p["進度(%)"]) || 0, lastStatus: p["目前執行狀態"] || p["上月執行狀態"] || "", nextPlan: p["下月計劃"] || "",
+                estDate: p["預期完成時間"] || getToday(), depts: typeof p["涉及部門"] === 'string' ? p["涉及部門"].split(",").map(s => s.trim()) : [],
+                collaborators: p["協同人員"] || "", purpose: p["目的預期"] || "", standard: p["執行標準"] || "", notes: p["備註"] || "", issues: p["執行難點"] || "", expanded: false, actualCompletedDate: p["實際完成日期"] || ""
+            });
+
+            let newProjects = [];
+            if (wb.Sheets["進行中項目"]) newProjects = [...newProjects, ...XLSX.utils.sheet_to_json(wb.Sheets["進行中項目"]).map(parseProjectRow)];
+            if (wb.Sheets["已完成重點項目"]) newProjects = [...newProjects, ...XLSX.utils.sheet_to_json(wb.Sheets["已完成重點項目"]).map(parseProjectRow).map(p => ({...p, progress: 100}))];
+
+            let newRoutines = [];
+            if (wb.Sheets["常規項目"]) {
+              newRoutines = XLSX.utils.sheet_to_json(wb.Sheets["常規項目"]).map(r => ({
+                id: generateId(), name: r["事務名稱"]||"", priority: r["重要程度"]||"中", desc: r["描述"]||"", status: r["目前執行狀態"] || r["狀態"] || "", 
+                depts: typeof r["涉及部門"] === 'string' ? r["涉及部門"].split(",").map(s => s.trim()) : [], review: r["回顧總結"]||"", expanded: false,
+                isCompleted: r["是否已歸檔"] === "是", actualCompletedDate: r["實際歸檔日期"] || r["實際完成日期"] || ""
+              }));
+            }
+
+            let newGrowths = [];
+            if (wb.Sheets["成員成長"]) {
+               newGrowths = XLSX.utils.sheet_to_json(wb.Sheets["成員成長"]).map(g => ({
+                 id: generateId(), targetPerson: g["意向人員"]||"", direction: g["階段目標"]||g["培養方向"]||"", recentPlan: g["近期計劃"]||"", 
+                 lastEffect: g["目前狀態"] || g["目前執行狀態"] || g["上月效果"] || g["完成效果"] || "", adjustment: g["調整方向"]||"", expanded: false, 
+                 isCompleted: g["是否已歸檔"] === "是", actualCompletedDate: g["實際歸檔日期"] || g["實際完成日期"] || ""
+               }));
+            }
+
+            let newReflections = [];
+            if (wb.Sheets["自省總結"]) {
+               newReflections = XLSX.utils.sheet_to_json(wb.Sheets["自省總結"]).map(r => ({
+                 id: generateId(), keyword: r["關鍵詞"]||"", explanation: r["解釋"]||"", adjustment: r["調整方向"]||"", expanded: false, 
+                 isCompleted: r["是否已歸檔"] === "是", actualCompletedDate: r["實際歸檔日期"] || r["實際完成日期"] || ""
+               }));
+            }
+
+            let newTodos = [];
+            const parseTodoRow = (t) => ({
+              id: generateId(), name: t["案子名稱"]||"", desc: t["簡述"]||"", priority: t["重要程度"]||"中", progress: parseInt(t["進度(%)"])||0,
+              lastStatus: t["最新狀態"]||"",
+              depts: typeof t["涉及部門"] === 'string' ? t["涉及部門"].split(",").map(s => s.trim()) : [], estDate: t["預期完成時間"]||getToday(),
+              collaborators: t["協作人員"]||"", notes: t["備註"]||"", expanded: false, actualCompletedDate: t["實際完成日期"]||""
+            });
+            if (wb.Sheets["進行中待辦細案"]) newTodos = [...newTodos, ...XLSX.utils.sheet_to_json(wb.Sheets["進行中待辦細案"]).map(parseTodoRow)];
+            if (wb.Sheets["已完成待辦細案"]) newTodos = [...newTodos, ...XLSX.utils.sheet_to_json(wb.Sheets["已完成待辦細案"]).map(parseTodoRow).map(t => ({...t, progress: 100}))];
+
+            setData({
+              reportDate: getToday(), reporterName: data.reporterName,
+              projects: newProjects.length > 0 ? newProjects : data.projects,
+              routines: newRoutines.length > 0 ? newRoutines : data.routines,
+              growths: newGrowths.length > 0 ? newGrowths : data.growths,
+              reflections: newReflections.length > 0 ? newReflections : data.reflections,
+              todos: newTodos.length > 0 ? newTodos : (data.todos || [])
+            });
+            showToast("Excel 導入成功！");
+          } catch (err) {
+            console.error(err);
+            showToast("導入失敗，請確認檔案格式！", "error");
+          }
+        };
+        reader.readAsBinaryString(file);
+        e.target.value = '';
+      };
+
+      const handleJump = (item, type) => {
+        const isCompleted = type === 'projects' || type === 'todos' ? item.progress === 100 : item.isCompleted;
+        setActiveTab(isCompleted ? 'completed' : (type === 'todos' ? 'todos' : 'progress'));
+        
+        if (!isCompleted) {
+          updateItem(type, item.id, 'expanded', true);
+        }
+
+        setTimeout(() => {
+          const el = document.getElementById(`item-${item.id}`);
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.classList.add('bg-yellow-200', 'shadow-md'); 
+            setTimeout(() => {
+              el.classList.remove('bg-yellow-200', 'shadow-md');
+            }, 1500);
+          }
+        }, 100);
+      };
+
+      const isDateUrgent = (dateStr) => {
+        if (!dateStr) return false;
+        const target = new Date(dateStr);
+        const today = new Date();
+        const diffDays = (target - today) / (1000 * 60 * 60 * 24);
+        return diffDays <= 30; // 30天內或逾期
+      };
+
+      // Progress Tab
+      let activeProjects = data.projects.filter(p => p.progress < 100);
+      if (filterPriority !== 'all') activeProjects = activeProjects.filter(p => p.priority === filterPriority);
+      activeProjects.sort((a, b) => {
+        const wA = PRIORITIES.find(x => x.level === a.priority)?.weight || 0;
+        const wB = PRIORITIES.find(x => x.level === b.priority)?.weight || 0;
+        return sortOrder === 'desc' ? wB - wA : wA - wB;
+      });
+
+      const activeRoutines = data.routines.filter(r => !r.isCompleted);
+      const activeGrowths = data.growths.filter(g => !g.isCompleted);
+      const activeReflections = data.reflections.filter(r => !r.isCompleted);
+
+      // Todos Tab
+      let activeTodosView = data.todos.filter(t => t.progress < 100);
+      if (todoFilterPriority !== 'all') activeTodosView = activeTodosView.filter(t => t.priority === todoFilterPriority);
+      if (todoFilterDept !== 'all') activeTodosView = activeTodosView.filter(t => t.depts.includes(todoFilterDept));
+      activeTodosView.sort((a, b) => {
+        const wA = PRIORITIES.find(x => x.level === a.priority)?.weight || 0;
+        const wB = PRIORITIES.find(x => x.level === b.priority)?.weight || 0;
+        return todoSortOrder === 'desc' ? wB - wA : wA - wB;
+      });
+
+      // Completed Tab
+      const completedProjects = data.projects.filter(p => p.progress === 100);
+      const completedRoutines = data.routines.filter(r => r.isCompleted);
+      const completedGrowths = data.growths.filter(g => g.isCompleted);
+      const completedReflections = data.reflections.filter(r => r.isCompleted);
+      const completedTodos = data.todos.filter(t => t.progress === 100);
+      const totalCompletedCount = completedProjects.length + completedRoutines.length + completedGrowths.length + completedReflections.length + completedTodos.length;
+
+      // Overview Tab
+      const ovFilterFn = (item) => {
+        if (ovPriority.length > 0 && item.priority && !ovPriority.includes(item.priority)) return false;
+        if (ovDepts.length > 0 && item.depts && !item.depts.some(d => ovDepts.includes(d))) return false;
+        if (ovSearch.trim()) {
+          const term = ovSearch.toLowerCase();
+          const searchable = [item.name, item.targetPerson, item.keyword, item.collaborators].join(" ").toLowerCase();
+          if (!searchable.includes(term)) return false;
+        }
+        if (ovStatus === 'active') {
+          if (item.progress !== undefined && item.progress === 100) return false;
+          if (item.isCompleted !== undefined && item.isCompleted) return false;
+        } else if (ovStatus === 'completed') {
+          if (item.progress !== undefined && item.progress < 100) return false;
+          if (item.isCompleted !== undefined && !item.isCompleted) return false;
+        }
+        return true;
+      };
+      const ovSortFn = (a, b) => {
+        const wA = PRIORITIES.find(x => x.level === (a.priority||'中'))?.weight || 0;
+        const wB = PRIORITIES.find(x => x.level === (b.priority||'中'))?.weight || 0;
+        return ovSort === 'desc' ? wB - wA : wA - wB;
+      };
+
+      const ovProjects = data.projects.filter(ovFilterFn).sort(ovSortFn);
+      const ovRoutines = data.routines.filter(ovFilterFn).sort(ovSortFn);
+      const ovTodos = data.todos.filter(ovFilterFn).sort(ovSortFn);
+      const ovGrowths = data.growths.filter(ovFilterFn); 
+      const ovReflections = data.reflections.filter(ovFilterFn);
+
+      return (
+        <div className="min-h-screen py-4 sm:py-8 print:py-0">
+          
+          {/* 頂部控制列 */}
+          <div className="max-w-[210mm] mx-auto mb-4 flex flex-col sm:flex-row flex-wrap justify-between items-start sm:items-end no-print gap-3 px-2 sm:px-0">
+            <div className="flex gap-1.5 overflow-x-auto w-full sm:w-auto bg-gray-200 p-1 rounded-t-lg scrollbar-hide shrink-0">
+              <button onClick={() => setActiveTab('progress')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold rounded transition whitespace-nowrap ${activeTab === 'progress' ? 'bg-white text-blue-700 shadow' : 'text-gray-500 hover:text-gray-800'}`}>
+                上月進度報告
+              </button>
+              <button onClick={() => setActiveTab('todos')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold rounded transition whitespace-nowrap ${activeTab === 'todos' ? 'bg-white text-orange-700 shadow' : 'text-gray-500 hover:text-gray-800'}`}>
+                待辦細案清單
+              </button>
+              <button onClick={() => setActiveTab('overview')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold rounded transition whitespace-nowrap ${activeTab === 'overview' ? 'bg-white text-purple-700 shadow' : 'text-gray-500 hover:text-gray-800'}`}>
+                總清單
+              </button>
+              <button onClick={() => setActiveTab('completed')} className={`px-3 py-1.5 text-xs sm:text-sm font-bold rounded transition flex items-center gap-1 whitespace-nowrap ${activeTab === 'completed' ? 'bg-white text-green-700 shadow' : 'text-gray-500 hover:text-gray-800'}`}>
+                完成項目清單
+                <span className="bg-green-100 text-green-700 text-[10px] px-1.5 py-0.5 rounded-full">{totalCompletedCount}</span>
+              </button>
+            </div>
+
+            <div className="flex flex-wrap gap-2 pb-1 w-full sm:w-auto shrink-0 items-center justify-start sm:justify-end">
+              {/* 雲端設定按鈕 (PWA/Supabase 功能) */}
+              <button onClick={() => setShowSettings(true)} className="flex items-center gap-1.5 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded text-xs sm:text-sm font-medium transition shadow-sm">
+                {syncStatus === 'synced' && <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" title="已同步"></span>}
+                {syncStatus === 'syncing' && <span className="w-2 h-2 rounded-full bg-yellow-400 animate-pulse" title="同步中..."></span>}
+                {syncStatus === 'error' && <span className="w-2 h-2 rounded-full bg-red-500" title="同步失敗"></span>}
+                {syncStatus === 'offline' && <span className="w-2 h-2 rounded-full bg-gray-300" title="未連接雲端"></span>}
+                <svg className="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path></svg>
+                雲端同步設定
+              </button>
+
+              <input type="file" accept=".xlsx, .xls" onChange={handleImport} className="hidden" id="excel-import" />
+              <label htmlFor="excel-import" className="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1.5 rounded text-xs sm:text-sm font-medium transition shadow flex items-center gap-1 cursor-pointer">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg> 導入 Excel
+              </label>
+              <button onClick={() => window.print()} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded text-xs sm:text-sm font-medium transition shadow flex items-center gap-1">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"></path></svg> 導出 PDF
+              </button>
+              <button onClick={handleExport} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded text-xs sm:text-sm font-medium transition shadow flex items-center gap-1">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg> 導出 Excel
+              </button>
+            </div>
+          </div>
+
+          <div className="a4-page relative group mt-0">
+            
+            <div className="flex justify-between items-end border-b-2 border-gray-800 pb-1 mb-2">
+              <h1 className="text-lg sm:text-xl font-black text-gray-900 tracking-tight">
+                {activeTab === 'progress' ? '月度工作進度與項目追蹤報告' : activeTab === 'todos' ? '待辦細案追蹤清單' : activeTab === 'overview' ? '項目與事務追蹤總清單' : '已完成項目與歸檔清單'}
+              </h1>
+              <div className="flex items-center gap-3 text-[10px] sm:text-xs text-gray-800">
+                <div className="flex items-center gap-1">
+                  <span className="font-bold bg-gray-200 px-1 py-0.5 rounded">報告時間</span>
+                  <input type="date" value={data.reportDate} onChange={(e) => updateData('reportDate', e.target.value)} className="w-[105px] font-bold text-blue-800 bg-transparent border-none outline-none cursor-pointer p-0 m-0"/>
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="font-bold bg-gray-200 px-1 py-0.5 rounded">報告人</span>
+                  <EditableInput value={data.reporterName} onChange={(v) => updateData('reporterName', v)} className="w-14 font-bold text-blue-800"/>
+                </div>
+              </div>
+            </div>
+
+            {activeTab === 'overview' && (
+              <div className="space-y-4 mt-2">
+                <div className="flex flex-wrap gap-2 items-center bg-gray-100 p-2 rounded border border-gray-300 no-print">
+                  <span className="text-xs font-bold text-gray-700">綜合篩選：</span>
+                  <select value={ovStatus} onChange={e => setOvStatus(e.target.value)} className="text-xs px-2 py-1 rounded border border-gray-300 outline-none cursor-pointer font-bold text-blue-700">
+                    <option value="all">全部狀態</option>
+                    <option value="active">進行中</option>
+                    <option value="completed">已完成/歸檔</option>
+                  </select>
+                  <div className="w-28"><MultiSelectDropdown options={PRIORITIES.map(p=>p.level)} selected={ovPriority} onChange={setOvPriority} placeholder="重要度"/></div>
+                  <div className="w-28"><MultiSelectDropdown options={DEPARTMENTS} selected={ovDepts} onChange={setOvDepts} placeholder="涉及部門"/></div>
+                  <input type="text" value={ovSearch} onChange={e=>setOvSearch(e.target.value)} placeholder="搜尋名稱/人員..." className="text-xs px-2 py-1 rounded border border-gray-300 w-32"/>
+                  <button onClick={() => setOvSort(prev => prev === 'desc' ? 'asc' : 'desc')} className="text-xs bg-white hover:bg-gray-50 px-2 py-1 rounded border border-gray-300 transition font-bold">
+                    排序 {ovSort === 'desc' ? '↓' : '↑'}
+                  </button>
+                  <button onClick={() => {setOvPriority([]); setOvDepts([]); setOvSearch(''); setOvStatus('all');}} className="text-xs text-gray-500 hover:text-gray-800 underline ml-auto">重置</button>
+                </div>
+
+                {ovProjects.length > 0 && (
+                  <div className="mt-2 overflow-x-auto">
+                    <div className="bg-gray-800 text-white px-2 py-1 mb-1 rounded-sm font-bold text-sm cursor-pointer hover:bg-gray-700 transition flex items-center justify-between min-w-[600px]" onClick={() => setOvExpanded(prev => ({ ...prev, _secProjects: !prev._secProjects }))}>
+                      <div>重點項目 <span className="text-[10px] font-normal opacity-80 ml-1">({ovProjects.length})</span></div>
+                      <svg className={`w-4 h-4 text-gray-300 transform transition-transform ${ovExpanded._secProjects ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                    {!ovExpanded._secProjects && (
+                    <table className="w-full text-left border-collapse text-xs min-w-[600px]">
+                      <thead>
+                        <tr className="bg-gray-100 text-gray-700 border-b-2 border-gray-300">
+                          <th className="p-1.5 w-[15%]">項目名稱</th>
+                          <th className="p-1.5 w-[8%]">重要度</th>
+                          <th className="p-1.5 w-[27%]">目前執行狀態</th>
+                          <th className="p-1.5 w-[15%]">完成度</th>
+                          <th className="p-1.5 w-[15%]">預期完成</th>
+                          <th className="p-1.5 w-[10%]">涉及部門</th>
+                          <th className="p-1.5 w-[10%]">協同人員</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ovProjects.map(item => (
+                          <tr key={item.id} onClick={() => handleJump(item, 'projects')} className="border-b border-gray-200 hover:bg-yellow-50 cursor-pointer transition-colors group">
+                            <td className="p-1.5 align-top font-bold text-gray-800 group-hover:text-blue-700">{item.name}</td>
+                            <td className="p-1.5 align-top">
+                              <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${PRIORITIES.find(p => p.level === item.priority)?.color || 'bg-gray-100'}`}>{item.priority}</span>
+                            </td>
+                            <td className="p-1.5 align-top text-gray-700 whitespace-pre-wrap break-words">{item.lastStatus || "-"}</td>
+                            <td className="p-1.5 align-top">
+                              <div className="flex items-center gap-1 w-full max-w-[80px]">
+                                <span className="font-bold text-blue-700 text-[10px] w-6">{item.progress}%</span>
+                                <div className="flex-1 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                                  <div className="h-full bg-green-600" style={{ width: `${item.progress}%` }}></div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className={`p-1.5 align-top ${isDateUrgent(item.estDate) && item.progress < 100 ? 'text-red-600 font-bold' : 'text-gray-600'}`}>
+                              <div>{item.estDate}</div>
+                              {item.progress < 100 && <div className="text-[10px] opacity-80">{getRemainingText(item.estDate)}</div>}
+                            </td>
+                            <td className="p-1.5 align-top text-[10px] text-gray-600">{item.depts.join(", ") || "-"}</td>
+                            <td className="p-1.5 align-top text-[10px] text-gray-600">{item.collaborators || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    )}
+                  </div>
+                )}
+
+                {ovTodos.length > 0 && (
+                  <div className="mt-4 overflow-x-auto">
+                    <div className="bg-orange-100 text-orange-900 border-l-4 border-orange-500 px-2 py-1 mb-1 rounded-sm font-bold text-sm cursor-pointer hover:bg-orange-200 transition flex items-center justify-between min-w-[600px]" onClick={() => setOvExpanded(prev => ({ ...prev, _secTodos: !prev._secTodos }))}>
+                      <div>待辦細案 <span className="text-[10px] font-normal text-orange-600 ml-1">({ovTodos.length})</span></div>
+                      <svg className={`w-4 h-4 text-orange-600 transform transition-transform ${ovExpanded._secTodos ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                    {!ovExpanded._secTodos && (
+                    <table className="w-full text-left border-collapse text-xs min-w-[600px]">
+                      <thead>
+                        <tr className="bg-orange-50 text-orange-800 border-b-2 border-orange-200">
+                          <th className="p-1.5 w-[15%]">案子名稱</th>
+                          <th className="p-1.5 w-[8%]">重要度</th>
+                          <th className="p-1.5 w-[18%]">簡述</th>
+                          <th className="p-1.5 w-[22%]">最新狀態</th>
+                          <th className="p-1.5 w-[15%]">進度</th>
+                          <th className="p-1.5 w-[12%]">預期完成</th>
+                          <th className="p-1.5 w-[10%]">涉及部門</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ovTodos.map(item => (
+                          <tr key={item.id} onClick={() => handleJump(item, 'todos')} className="border-b border-orange-100 hover:bg-yellow-50 cursor-pointer transition-colors group">
+                            <td className="p-1.5 align-top font-bold text-orange-900 group-hover:text-blue-700">{item.name}</td>
+                            <td className="p-1.5 align-top">
+                              <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${PRIORITIES.find(p => p.level === item.priority)?.color || 'bg-gray-100'}`}>{item.priority}</span>
+                            </td>
+                            <td className="p-1.5 align-top text-gray-700 whitespace-pre-wrap break-words">{item.desc || "-"}</td>
+                            <td className="p-1.5 align-top font-bold text-orange-800 whitespace-pre-wrap break-words">{item.lastStatus || "-"}</td>
+                            <td className="p-1.5 align-top">
+                              <div className="flex items-center gap-1 w-full max-w-[80px]">
+                                <span className="font-bold text-blue-700 text-[10px] w-6">{item.progress}%</span>
+                                <div className="flex-1 h-1.5 bg-orange-200 rounded-full overflow-hidden">
+                                  <div className="h-full bg-orange-600" style={{ width: `${item.progress}%` }}></div>
+                                </div>
+                              </div>
+                            </td>
+                            <td className={`p-1.5 align-top ${isDateUrgent(item.estDate) && item.progress < 100 ? 'text-red-600 font-bold' : 'text-gray-600'}`}>
+                              <div>{item.estDate}</div>
+                              {item.progress < 100 && <div className="text-[10px] opacity-80">{getRemainingText(item.estDate)}</div>}
+                            </td>
+                            <td className="p-1.5 align-top text-[10px] text-gray-600">{item.depts.join(", ") || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    )}
+                  </div>
+                )}
+
+                {ovRoutines.length > 0 && (
+                  <div className="mt-4 overflow-x-auto">
+                    <div className="bg-gray-200 text-gray-800 border-l-4 border-gray-500 px-2 py-1 mb-1 rounded-sm font-bold text-sm min-w-[600px]">常規項目 <span className="text-[10px] font-normal text-gray-500 ml-1">({ovRoutines.length})</span></div>
+                    <table className="w-full text-left border-collapse text-xs min-w-[600px]">
+                      <thead>
+                        <tr className="bg-gray-50 text-gray-600 border-b border-gray-300">
+                          <th className="p-1.5 w-[20%]">事務名稱</th>
+                          <th className="p-1.5 w-[8%]">重要度</th>
+                          <th className="p-1.5 w-[42%]">目前執行狀態</th>
+                          <th className="p-1.5 w-[15%]">完成度</th>
+                          <th className="p-1.5 w-[15%]">涉及部門</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ovRoutines.map(item => (
+                          <tr key={item.id} onClick={() => handleJump(item, 'routines')} className="border-b border-gray-100 hover:bg-yellow-50 cursor-pointer transition-colors group">
+                            <td className="p-1.5 align-top font-bold text-gray-800 group-hover:text-blue-700">{item.name}</td>
+                            <td className="p-1.5 align-top">
+                              <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${PRIORITIES.find(p => p.level === (item.priority||"中"))?.color || 'bg-gray-100'}`}>{item.priority || "中"}</span>
+                            </td>
+                            <td className="p-1.5 align-top text-gray-700 whitespace-pre-wrap break-words">{item.status || "-"}</td>
+                            <td className={`p-1.5 align-top font-bold ${item.isCompleted ? 'text-green-600' : 'text-blue-600'}`}>{item.isCompleted ? '已完成' : '進行中'}</td>
+                            <td className="p-1.5 align-top text-[10px] text-gray-600">{item.depts.join(", ") || "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {ovGrowths.length > 0 && (
+                  <div className="mt-4 overflow-x-auto">
+                    <div className="bg-blue-100 text-blue-900 border-l-4 border-blue-500 px-2 py-1 mb-1 rounded-sm font-bold text-sm cursor-pointer hover:bg-blue-200 transition flex items-center justify-between min-w-[600px]" onClick={() => setOvExpanded(prev => ({ ...prev, _secGrowths: !prev._secGrowths }))}>
+                      <div>成員成長 <span className="text-[10px] font-normal text-blue-600 ml-1">({ovGrowths.length})</span></div>
+                      <svg className={`w-4 h-4 text-blue-600 transform transition-transform ${ovExpanded._secGrowths ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                    {!ovExpanded._secGrowths && (
+                    <table className="w-full text-left border-collapse text-xs min-w-[600px]">
+                      <thead>
+                        <tr className="bg-blue-50 text-blue-800 border-b border-blue-200">
+                          <th className="p-1.5 w-1/5">人員</th>
+                          <th className="p-1.5 w-1/3">階段目標</th>
+                          <th className="p-1.5 w-1/3">目前狀態</th>
+                          <th className="p-1.5 w-1/6">歸檔狀態</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ovGrowths.map(item => (
+                          <React.Fragment key={item.id}>
+                            <tr onClick={() => handleJump(item, 'growths')} className="border-b border-blue-50 hover:bg-yellow-50 cursor-pointer transition-colors group">
+                              <td className="p-1.5 align-top flex gap-1 items-start">
+                                <button onClick={(e) => toggleOvExpand(e, item.id)} className="p-0.5 text-blue-400 hover:text-blue-700 mt-0.5 flex-shrink-0" title="展開細節">
+                                  <svg className={`w-3 h-3 transform transition-transform ${ovExpanded[item.id] ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M9 5l7 7-7 7"></path></svg>
+                                </button>
+                                <span className="font-bold text-blue-900 group-hover:text-blue-700">{item.targetPerson}</span>
+                              </td>
+                              <td className="p-1.5 align-top text-gray-700 whitespace-pre-wrap break-words">{item.direction || "-"}</td>
+                              <td className="p-1.5 align-top text-gray-600 whitespace-pre-wrap break-words">{item.lastEffect || "-"}</td>
+                              <td className={`p-1.5 align-top font-bold ${item.isCompleted ? 'text-green-600' : 'text-blue-600'}`}>{item.isCompleted ? '已歸檔' : '進行中'}</td>
+                            </tr>
+                            {ovExpanded[item.id] && (
+                              <tr className="bg-blue-50/50 print-border">
+                                <td colSpan="4" className="p-2 border-b border-blue-100">
+                                  <div className="text-[10px] text-gray-700 grid grid-cols-2 gap-4">
+                                    <div><span className="font-bold text-blue-800">近期計畫：</span><span className="whitespace-pre-wrap break-words">{item.recentPlan || "-"}</span></div>
+                                    <div><span className="font-bold text-orange-700">調整方向：</span><span className="whitespace-pre-wrap break-words">{item.adjustment || "-"}</span></div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                    )}
+                  </div>
+                )}
+                
+                {ovReflections.length > 0 && (
+                  <div className="mt-4 overflow-x-auto">
+                    <div className="bg-purple-100 text-purple-900 border-l-4 border-purple-500 px-2 py-1 mb-1 rounded-sm font-bold text-sm cursor-pointer hover:bg-purple-200 transition flex items-center justify-between min-w-[600px]" onClick={() => setOvExpanded(prev => ({ ...prev, _secReflections: !prev._secReflections }))}>
+                      <div>管理自省與總結 <span className="text-[10px] font-normal text-purple-600 ml-1">({ovReflections.length})</span></div>
+                      <svg className={`w-4 h-4 text-purple-600 transform transition-transform ${ovExpanded._secReflections ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </div>
+                    {!ovExpanded._secReflections && (
+                    <table className="w-full text-left border-collapse text-xs min-w-[600px]">
+                      <thead>
+                        <tr className="bg-purple-50 text-purple-800 border-b border-purple-200">
+                          <th className="p-1.5 w-1/4">關鍵詞</th>
+                          <th className="p-1.5 w-3/4">問題解釋</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {ovReflections.map(item => (
+                          <React.Fragment key={item.id}>
+                            <tr onClick={() => handleJump(item, 'reflections')} className="border-b border-purple-50 hover:bg-yellow-50 cursor-pointer transition-colors group">
+                              <td className="p-1.5 align-top flex gap-1 items-start">
+                                <button onClick={(e) => toggleOvExpand(e, item.id)} className="p-0.5 text-purple-400 hover:text-purple-700 mt-0.5 flex-shrink-0" title="展開細節">
+                                  <svg className={`w-3 h-3 transform transition-transform ${ovExpanded[item.id] ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M9 5l7 7-7 7"></path></svg>
+                                </button>
+                                <span className="font-bold text-purple-900 group-hover:text-purple-700">{item.keyword}</span>
+                              </td>
+                              <td className="p-1.5 align-top text-gray-700 whitespace-pre-wrap break-words">{item.explanation || "-"}</td>
+                            </tr>
+                            {ovExpanded[item.id] && (
+                              <tr className="bg-purple-50/50 print-border">
+                                <td colSpan="2" className="p-2 border-b border-purple-100 text-[10px]">
+                                  <span className="font-bold text-green-700">調整方案：</span>
+                                  <span className="whitespace-pre-wrap break-words">{item.adjustment || "-"}</span>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        ))}
+                      </tbody>
+                    </table>
+                    )}
+                  </div>
+                )}
+
+                {ovProjects.length + ovRoutines.length + ovTodos.length + ovGrowths.length + ovReflections.length === 0 && (
+                   <div className="text-center text-gray-400 text-xs py-8 italic border border-dashed rounded bg-gray-50">查無符合條件的項目</div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'todos' && (
+              <div className="space-y-3 mt-2">
+                <div className="flex items-center gap-2 bg-orange-100 text-orange-900 px-2 py-1 mb-1 rounded-sm border-l-4 border-orange-500">
+                  <div className="font-bold text-sm">待辦細案清單 <span className="text-[10px] font-normal opacity-80">({activeTodosView.length})</span></div>
+                  <button onClick={() => addItem('todos', { name: "", desc: "", priority: "中", progress: 0, lastStatus: "", estDate: getToday(), depts: [], collaborators: "", notes: "" })} className="no-print bg-orange-500 hover:bg-orange-600 text-white px-1 py-0.5 rounded text-[10px] font-bold shadow transition flex items-center gap-0.5">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>新增
+                  </button>
+                  <div className="ml-auto flex items-center gap-2 text-xs no-print text-black">
+                    <select value={todoFilterPriority} onChange={e => setTodoFilterPriority(e.target.value)} className="bg-white border border-gray-300 rounded px-1 py-0.5 outline-none cursor-pointer">
+                      <option value="all">所有重要度</option>
+                      {PRIORITIES.map(p => <option key={p.level} value={p.level}>{p.level}</option>)}
+                    </select>
+                    <select value={todoFilterDept} onChange={e => setTodoFilterDept(e.target.value)} className="bg-white border border-gray-300 rounded px-1 py-0.5 outline-none cursor-pointer">
+                      <option value="all">所有部門</option>
+                      {DEPARTMENTS.map(d => <option key={d} value={d}>{d}</option>)}
+                    </select>
+                    <button onClick={() => setTodoSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')} className="bg-white hover:bg-gray-50 px-2 py-0.5 rounded transition flex items-center gap-1 border border-gray-300">
+                      排序 {todoSortOrder === 'desc' ? '↓' : '↑'}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  {activeTodosView.map((item, index) => {
+                    const pColor = PRIORITIES.find(p => p.level === item.priority)?.color || 'bg-gray-400';
+                    return (
+                      <div key={item.id} id={`item-${item.id}`} className="border border-orange-200 rounded p-1.5 bg-white hover:border-orange-300 transition-colors relative print-border item-highlight">
+                        
+                        <div className="flex justify-between items-start gap-2">
+                          <div className="flex items-start gap-1 flex-1 min-w-0 pr-16">
+                            <button onClick={() => updateItem('todos', item.id, 'expanded', !item.expanded)} className="p-0.5 text-orange-400 hover:text-orange-700 hover:bg-orange-50 rounded no-print flex-shrink-0 mt-0.5">
+                              <svg className={`w-4 h-4 transform transition-transform ${item.expanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7-7"></path></svg>
+                            </button>
+                            <span className="font-bold text-orange-300 text-xs flex-shrink-0 mt-1">{index + 1}.</span>
+                            <div className="mt-0.5 shrink-0"><PriorityDropdown selected={item.priority} onChange={val => updateItem('todos', item.id, 'priority', val)} /></div>
+                            <AutoGrowTextarea value={item.name} onChange={v => updateItem('todos', item.id, 'name', v)} placeholder="案子名稱" className="font-bold text-orange-900 w-[120px] sm:w-[150px] flex-shrink-0 text-[11px]" />
+                            <AutoGrowTextarea value={item.desc} onChange={v => updateItem('todos', item.id, 'desc', v)} placeholder="簡單描述..." className="flex-1 text-gray-600 min-w-0 text-[10px]" />
+                          </div>
+                          
+                          <div className="absolute top-1 right-1 flex items-center gap-0.5 no-print z-10 bg-white pl-1 rounded">
+                            <button onClick={() => handleCompleteClick('todos', item.id, 'progress', 100)} className="text-green-600 hover:bg-green-50 p-1.5 rounded" title="標記為完成"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg></button>
+                            <div className="h-4 w-px bg-gray-200 mx-0.5"></div>
+                            <button onClick={() => deleteItem('todos', item.id)} className="text-red-400 hover:bg-red-50 hover:text-red-600 p-1.5 rounded" title="刪除項目"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                          </div>
+                        </div>
+
+                        <div className="flex items-start gap-2 mt-1.5 pr-12 w-full border-t border-orange-50 pt-1.5 pl-5">
+                          <span className="text-[10px] text-orange-400 font-bold whitespace-nowrap bg-orange-50 px-1 rounded h-fit mt-0.5 shrink-0">最新狀態</span>
+                          <AutoGrowTextarea value={item.lastStatus} onChange={v => updateItem('todos', item.id, 'lastStatus', v)} placeholder="填寫目前最新狀態..." className="flex-1 text-orange-800 min-w-0" />
+                        </div>
+
+                        <div className="flex items-center gap-3 mt-1.5 pr-12 w-full border-t border-orange-50 pt-1.5 pl-5">
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[10px] text-gray-400 font-bold mb-0.5">涉及部門</div>
+                            <MultiSelectDropdown options={DEPARTMENTS} selected={item.depts} onChange={v => updateItem('todos', item.id, 'depts', v)} />
+                          </div>
+                          <div className="w-[150px] shrink-0">
+                            <div className="text-[10px] text-gray-400 font-bold mb-1">進度追蹤</div>
+                            <div className="flex items-center gap-1.5">
+                              <input type="range" min="0" max="100" step="10" value={item.progress} onChange={e => updateItem('todos', item.id, 'progress', parseInt(e.target.value))} className="w-full h-1.5 cursor-pointer accent-orange-500" style={{ background: `linear-gradient(to right, #f97316 ${item.progress}%, #e5e7eb ${item.progress}%)` }} />
+                              <span className="text-[10px] font-bold w-6 text-right text-orange-700">{item.progress}%</span>
+                            </div>
+                          </div>
+                          <div className="w-[100px] shrink-0 border-l border-orange-100 pl-2">
+                            <div className="text-[10px] text-gray-400 font-bold mb-0.5">預期完成日</div>
+                            <input type="date" value={item.estDate} onChange={e => updateItem('todos', item.id, 'estDate', e.target.value)} className={`w-full text-[10px] bg-transparent border-b border-dashed border-gray-300 p-0.5 ${isDateUrgent(item.estDate) ? 'text-red-600 font-bold' : ''}`} />
+                          </div>
+                        </div>
+
+                        {item.expanded && (
+                          <div className="bg-orange-50/50 border border-orange-100 rounded p-1.5 mt-2 ml-5 grid grid-cols-2 gap-4 text-[10px] text-gray-700 print-border">
+                            <div className="flex flex-col gap-0.5">
+                              <span className="font-bold text-blue-800">協作人員</span>
+                              <AutoGrowTextarea value={item.collaborators} onChange={v => updateItem('todos', item.id, 'collaborators', v)} className="bg-white border-orange-200 shadow-sm rounded p-1" placeholder="填寫協作人員..." />
+                            </div>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="font-bold text-gray-600">備註細節</span>
+                              <AutoGrowTextarea value={item.notes} onChange={v => updateItem('todos', item.id, 'notes', v)} className="bg-white border-orange-200 shadow-sm rounded p-1" placeholder="紀錄相關事項..." />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {activeTodosView.length === 0 && <div className="text-center text-gray-400 text-xs py-4 italic border border-dashed rounded bg-gray-50">目前無符合條件的待辦細案</div>}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'progress' && (
+              <div className="space-y-3">
+                <section>
+                  <div className="flex items-center gap-2 bg-gray-800 text-white px-2 py-1 mb-1 rounded-sm">
+                    <div className="font-bold text-sm">重點項目追蹤 <span className="text-[10px] font-normal opacity-80">({activeProjects.length})</span></div>
+                    <button onClick={() => addItem('projects', { name: "", desc: "", priority: "中", progress: 0, lastStatus: "", nextPlan: "", estDate: getToday(), depts: [], collaborators: "", purpose: "", standard: "", notes: "", issues: "" })} className="no-print bg-blue-600 hover:bg-blue-500 text-white px-1 py-0.5 rounded text-[10px] font-bold shadow transition flex items-center gap-0.5">
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>新增
+                    </button>
+                    <div className="ml-auto flex items-center gap-2 text-xs no-print text-black">
+                      <select value={filterPriority} onChange={e => setFilterPriority(e.target.value)} className="bg-gray-100 border border-gray-300 rounded px-1 py-0.5 outline-none cursor-pointer">
+                        <option value="all">所有重要度</option>
+                        {PRIORITIES.map(p => <option key={p.level} value={p.level}>{p.level}</option>)}
+                      </select>
+                      <button onClick={() => setSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')} className="bg-gray-200 hover:bg-gray-300 px-2 py-0.5 rounded transition flex items-center gap-1 border border-gray-300">
+                        排序 {sortOrder === 'desc' ? '↓' : '↑'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {activeProjects.map((item, index) => {
+                      const pColor = PRIORITIES.find(p => p.level === item.priority)?.color || 'bg-gray-400';
+                      return (
+                        <div key={item.id} id={`item-${item.id}`} className="border border-gray-300 rounded p-1 bg-white hover:border-blue-300 transition-colors relative print-border item-highlight">
+                          <div className="flex justify-between items-start gap-2">
+                            <div className="flex items-start gap-1 flex-1 min-w-0">
+                              <button onClick={() => updateItem('projects', item.id, 'expanded', !item.expanded)} className="p-0.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded no-print flex-shrink-0 mt-0.5">
+                                <svg className={`w-4 h-4 transform transition-transform ${item.expanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7-7"></path></svg>
+                              </button>
+                              <span className="font-bold text-gray-400 text-xs flex-shrink-0 mt-1">{index + 1}.</span>
+                              <AutoGrowTextarea value={item.name} onChange={v => updateItem('projects', item.id, 'name', v)} placeholder="項目名稱" className="font-bold w-[120px] sm:w-[150px] flex-shrink-0" />
+                              <span className="text-gray-300 flex-shrink-0 mt-1">|</span>
+                              <AutoGrowTextarea value={item.desc} onChange={v => updateItem('projects', item.id, 'desc', v)} placeholder="簡單描述..." className="flex-1 text-gray-600 min-w-0" />
+                            </div>
+
+                            <div className="flex items-center gap-2 flex-shrink-0 no-print mt-1">
+                              <PriorityDropdown selected={item.priority} onChange={val => updateItem('projects', item.id, 'priority', val)} />
+                              <div className="h-4 w-px bg-gray-300"></div>
+                              <div className="flex items-center gap-1 w-[80px]">
+                                <input 
+                                  type="range" min="0" max="100" step="10" 
+                                  value={item.progress} 
+                                  onChange={e => updateItem('projects', item.id, 'progress', parseInt(e.target.value))} 
+                                  className="w-full h-1.5 cursor-pointer" 
+                                  style={{ background: `linear-gradient(to right, #16a34a ${item.progress}%, #e5e7eb ${item.progress}%)` }}
+                                />
+                                <span className="text-[10px] font-bold w-6 text-right text-blue-700">{item.progress}%</span>
+                              </div>
+                              <div className="h-4 w-px bg-gray-300"></div> 
+                              <div className="flex items-center gap-0.5">
+                                <button onClick={() => handleCompleteClick('projects', item.id, 'progress', 100)} className="text-green-600 hover:bg-green-100 p-1 rounded" title="標記為完成"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg></button>
+                                <button onClick={() => deleteItem('projects', item.id)} className="text-red-400 hover:bg-red-50 hover:text-red-600 p-1 rounded" title="刪除項目"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                              </div>
+                            </div>
+                            <div className="hidden print:flex items-center gap-1 text-xs font-bold mt-1">
+                              <span className={`px-1 py-0.5 rounded border text-[10px] ${pColor}`}>{item.priority}</span>
+                              <span className="text-blue-700">{item.progress}%</span>
+                            </div>
+                          </div>
+
+                          {item.expanded && (
+                            <div className="bg-yellow-50 border border-yellow-100 rounded p-1 mt-1 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-gray-700 print-border">
+                              <div className="flex items-start gap-1"><span className="font-bold whitespace-nowrap pt-0.5 w-12 text-right text-yellow-800">協同人員:</span><AutoGrowTextarea value={item.collaborators} onChange={v => updateItem('projects', item.id, 'collaborators', v)} className="flex-1 bg-white border-yellow-200" /></div>
+                              <div className="flex items-start gap-1"><span className="font-bold whitespace-nowrap pt-0.5 w-12 text-right text-red-700">執行難點:</span><AutoGrowTextarea value={item.issues} onChange={v => updateItem('projects', item.id, 'issues', v)} className="flex-1 bg-white border-yellow-200 text-red-700" /></div>
+                              <div className="flex items-start gap-1"><span className="font-bold whitespace-nowrap pt-0.5 w-12 text-right text-yellow-800">備註事項:</span><AutoGrowTextarea value={item.notes} onChange={v => updateItem('projects', item.id, 'notes', v)} className="flex-1 bg-white border-yellow-200" /></div>
+                              <div className="flex items-start gap-1"><span className="font-bold whitespace-nowrap pt-0.5 w-12 text-right text-blue-700">執行標準:</span><AutoGrowTextarea value={item.standard} onChange={v => updateItem('projects', item.id, 'standard', v)} className="flex-1 bg-white border-yellow-200 text-blue-800" /></div>
+                              <div className="flex items-start gap-1 col-span-2"><span className="font-bold whitespace-nowrap pt-0.5 w-12 text-right text-purple-700">目的預期:</span><AutoGrowTextarea value={item.purpose} onChange={v => updateItem('projects', item.id, 'purpose', v)} className="flex-1 bg-white border-yellow-200 text-purple-700" /></div>
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-12 gap-1.5 mt-1 border-t border-gray-100 pt-1">
+                            <div className="col-span-3">
+                              <div className="text-[10px] text-gray-500 font-bold mb-0.5">目前執行狀態</div>
+                              <AutoGrowTextarea value={item.lastStatus} onChange={v => updateItem('projects', item.id, 'lastStatus', v)} placeholder="填寫狀態..." />
+                            </div>
+                            <div className="col-span-4">
+                              <div className="text-[10px] text-gray-500 font-bold mb-0.5">下月計畫</div>
+                              <AutoGrowTextarea value={item.nextPlan} onChange={v => updateItem('projects', item.id, 'nextPlan', v)} placeholder="填寫計畫..." />
+                            </div>
+                            <div className="col-span-2">
+                              <div className="text-[10px] text-gray-500 font-bold mb-0.5">預期完成日</div>
+                              <input type="date" value={item.estDate} onChange={e => updateItem('projects', item.id, 'estDate', e.target.value)} className={`w-full text-xs bg-transparent border-b border-dashed border-gray-300 p-0.5 ${isDateUrgent(item.estDate) ? 'text-red-600 font-bold' : ''}`} />
+                            </div>
+                            <div className="col-span-3">
+                              <div className="text-[10px] text-gray-500 font-bold mb-0.5">涉及部門</div>
+                              <MultiSelectDropdown options={DEPARTMENTS} selected={item.depts} onChange={v => updateItem('projects', item.id, 'depts', v)} />
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {activeProjects.length === 0 && <div className="text-center text-gray-400 text-xs py-2 italic border border-dashed rounded bg-gray-50">目前無進行中重點項目</div>}
+                  </div>
+                </section>
+
+                <section>
+                  <div className="flex items-center gap-2 bg-gray-200 text-gray-800 px-2 py-1 mb-1 rounded-sm border-l-4 border-gray-500">
+                    <div className="font-bold text-sm">常規項目追蹤 <span className="text-[10px] font-normal opacity-80">({activeRoutines.length})</span></div>
+                    <button onClick={() => addItem('routines', { name: "", desc: "", priority: "中", status: "", depts: [], review: "", isCompleted: false })} className="no-print bg-gray-400 hover:bg-gray-500 text-white px-1 py-0.5 rounded text-[10px] font-bold shadow transition flex items-center gap-0.5">
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>新增
+                    </button>
+                  </div>
+                  <div className="space-y-1">
+                    {activeRoutines.map((item) => (
+                      <div key={item.id} id={`item-${item.id}`} className="border border-gray-200 rounded p-1 bg-white print-border group/item relative item-highlight">
+                        <div className="absolute top-1 right-1 flex gap-0.5 opacity-0 group-hover/item:opacity-100 no-print transition-opacity z-10">
+                          <button onClick={() => handleCompleteClick('routines', item.id, 'isCompleted', true)} className="text-green-500 hover:bg-green-50 p-1 rounded" title="標記為完成並歸檔"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg></button>
+                          <div className="h-4 w-px bg-gray-300 mx-0.5 mt-1"></div>
+                          <button onClick={() => deleteItem('routines', item.id)} className="text-red-400 hover:bg-red-50 hover:text-red-600 p-1 rounded" title="刪除項目"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                        </div>
+                        
+                        <div className="flex flex-col gap-1 w-full">
+                          <div className="flex gap-1 items-start pr-20 w-full">
+                            <button onClick={() => updateItem('routines', item.id, 'expanded', !item.expanded)} className="p-0.5 text-gray-400 hover:text-blue-600 no-print flex-shrink-0 mt-0.5">
+                              <svg className={`w-3.5 h-3.5 transform transition-transform ${item.expanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path></svg>
+                            </button>
+                            <div className="mt-0.5 shrink-0"><PriorityDropdown selected={item.priority || "中"} onChange={val => updateItem('routines', item.id, 'priority', val)} /></div>
+                            <AutoGrowTextarea value={item.name} onChange={v => updateItem('routines', item.id, 'name', v)} placeholder="事務名稱" className="font-bold text-[11px] w-[120px] sm:w-[150px] shrink-0" />
+                            <AutoGrowTextarea value={item.desc} onChange={v => updateItem('routines', item.id, 'desc', v)} placeholder="事務描述..." className="flex-1 text-gray-600 text-[10px] min-w-0" />
+                          </div>
+                          <div className="flex items-start gap-2 pr-12 pl-6 w-full mt-0.5 border-t border-gray-100 pt-1">
+                            <div className="flex items-start gap-1 flex-1 min-w-0">
+                               <span className="text-[10px] text-gray-400 font-bold whitespace-nowrap bg-gray-100 px-1 rounded h-fit mt-0.5">目前執行狀態</span>
+                               <AutoGrowTextarea value={item.status} onChange={v => updateItem('routines', item.id, 'status', v)} placeholder="狀態..." className="flex-1 text-blue-700 text-[10px] min-w-0" />
+                            </div>
+                            <div className="flex items-start gap-1 flex-1 border-l border-gray-100 pl-1 min-w-0">
+                               <span className="text-[10px] text-gray-400 font-bold whitespace-nowrap bg-gray-100 px-1 rounded h-fit mt-0.5">涉及部門</span>
+                               <div className="flex-1 min-w-0"><MultiSelectDropdown options={DEPARTMENTS} selected={item.depts || []} onChange={v => updateItem('routines', item.id, 'depts', v)} /></div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {item.expanded && (
+                          <div className="mt-1 ml-6 border-l-2 border-yellow-400 pl-2 py-0.5 bg-gray-50 text-[10px]">
+                            <span className="font-bold text-gray-600 flex items-center gap-1">執行回顧 / 問題總結：</span>
+                            <AutoGrowTextarea value={item.review} onChange={v => updateItem('routines', item.id, 'review', v)} className="w-full mt-0.5 border-none bg-transparent" />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+
+                <div className="space-y-3">
+                  <section>
+                    <div className="flex items-center gap-2 bg-blue-100 text-blue-900 px-2 py-1 mb-1 rounded-sm border-l-4 border-blue-500">
+                      <div className="font-bold text-sm">成員成長與培養 <span className="text-[10px] font-normal opacity-80">({activeGrowths.length})</span></div>
+                      <button onClick={() => addItem('growths', { targetPerson: "", direction: "", recentPlan: "", lastEffect: "", adjustment: "", isCompleted: false })} className="no-print bg-blue-500 hover:bg-blue-600 text-white px-1 py-0.5 rounded text-[10px] font-bold shadow transition flex items-center gap-0.5">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>新增
+                      </button>
+                    </div>
+                    <div className="space-y-1">
+                      {activeGrowths.map((item) => (
+                        <div key={item.id} id={`item-${item.id}`} className="border border-blue-100 rounded p-1 bg-white text-[10px] relative group/item print-border flex flex-col gap-1 item-highlight">
+                          <div className="absolute top-1 right-1 flex gap-0.5 opacity-0 group-hover/item:opacity-100 no-print transition-opacity z-10">
+                            <button onClick={() => handleCompleteClick('growths', item.id, 'isCompleted', true)} className="text-green-500 hover:bg-green-50 p-1 rounded" title="標記為完成並歸檔"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg></button>
+                            <div className="h-4 w-px bg-gray-300 mx-0.5 mt-1"></div>
+                            <button onClick={() => deleteItem('growths', item.id)} className="text-red-400 hover:bg-red-50 hover:text-red-600 p-1 rounded" title="刪除項目"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                          </div>
+                          <div className="flex flex-col gap-1 pr-16 w-full">
+                            <div className="flex items-start gap-2 w-full">
+                              <div className="flex items-start gap-1 shrink-0 whitespace-nowrap">
+                                <span className="text-gray-400 font-bold bg-blue-50 px-1 rounded h-fit mt-0.5">人員</span> 
+                                <EditableInput value={item.targetPerson} onChange={v => updateItem('growths', item.id, 'targetPerson', v)} className="font-bold text-blue-800 w-16" />
+                              </div>
+                              <div className="flex items-start gap-1 flex-1 border-l border-blue-50 pl-2 min-w-0">
+                                <span className="text-gray-400 font-bold bg-blue-50 px-1 rounded h-fit mt-0.5 shrink-0">階段目標</span> 
+                                <AutoGrowTextarea value={item.direction} onChange={v => updateItem('growths', item.id, 'direction', v)} className="flex-1 min-w-0" />
+                              </div>
+                            </div>
+                            <div className="flex items-start gap-1 w-full mt-0.5 border-t border-blue-50/50 pt-1">
+                              <span className="text-gray-400 font-bold whitespace-nowrap bg-blue-50 px-1 rounded h-fit mt-0.5 shrink-0">近期計劃</span> 
+                              <AutoGrowTextarea value={item.recentPlan} onChange={v => updateItem('growths', item.id, 'recentPlan', v)} className="flex-1 min-w-0" />
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-2 pr-12 w-full mt-0.5 border-t border-blue-50 pt-1">
+                            <div className="flex items-start gap-1 flex-1 min-w-0">
+                              <span className="text-gray-400 font-bold whitespace-nowrap bg-green-50 px-1 rounded text-green-700 h-fit mt-0.5">目前狀態</span> 
+                              <AutoGrowTextarea value={item.lastEffect} onChange={v => updateItem('growths', item.id, 'lastEffect', v)} className="flex-1 text-green-700 min-w-0" />
+                            </div>
+                            <div className="flex items-start gap-1 flex-1 border-l border-blue-50 pl-1 min-w-0">
+                              <span className="text-gray-400 font-bold whitespace-nowrap bg-orange-50 px-1 rounded text-orange-700 h-fit mt-0.5">調整方向</span> 
+                              <AutoGrowTextarea value={item.adjustment} onChange={v => updateItem('growths', item.id, 'adjustment', v)} className="flex-1 text-orange-700 min-w-0" />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  <section>
+                    <div className="flex items-center gap-2 bg-purple-100 text-purple-900 px-2 py-1 mb-1 rounded-sm border-l-4 border-purple-500">
+                      <div className="font-bold text-sm">管理自省與總結 <span className="text-[10px] font-normal opacity-80">({activeReflections.length})</span></div>
+                      <button onClick={() => addItem('reflections', { keyword: "", explanation: "", adjustment: "", isCompleted: false })} className="no-print bg-purple-500 hover:bg-purple-600 text-white px-1 py-0.5 rounded text-[10px] font-bold shadow transition flex items-center gap-0.5">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M12 4v16m8-8H4"></path></svg>新增
+                      </button>
+                    </div>
+                    <div className="space-y-1">
+                      {activeReflections.map((item) => (
+                        <div key={item.id} id={`item-${item.id}`} className="border border-purple-100 rounded p-1 bg-white text-[10px] relative group/item print-border flex flex-col gap-1 item-highlight">
+                          <div className="absolute top-1 right-1 flex gap-0.5 opacity-0 group-hover/item:opacity-100 no-print transition-opacity z-10">
+                            <button onClick={() => handleCompleteClick('reflections', item.id, 'isCompleted', true)} className="text-green-500 hover:bg-green-50 p-1 rounded" title="標記為歸檔"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg></button>
+                            <div className="h-4 w-px bg-gray-300 mx-0.5 mt-1"></div>
+                            <button onClick={() => deleteItem('reflections', item.id)} className="text-red-400 hover:bg-red-50 hover:text-red-600 p-1 rounded" title="刪除項目"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                          </div>
+                          <div className="flex items-start gap-2 pr-16 w-full">
+                            <div className="flex items-start gap-1 shrink-0 whitespace-nowrap">
+                               <span className="text-gray-400 font-bold bg-purple-50 px-1 rounded h-fit mt-0.5">關鍵詞</span> 
+                               <EditableInput value={item.keyword} onChange={v => updateItem('reflections', item.id, 'keyword', v)} className="font-bold text-purple-800 w-24" />
+                            </div>
+                            <div className="flex items-start gap-1 flex-1 border-l border-purple-50 pl-1 min-w-0">
+                               <span className="text-gray-400 font-bold whitespace-nowrap bg-gray-50 px-1 rounded h-fit mt-0.5">問題解釋</span> 
+                               <AutoGrowTextarea value={item.explanation} onChange={v => updateItem('reflections', item.id, 'explanation', v)} className="flex-1 min-w-0" />
+                            </div>
+                          </div>
+                          <div className="flex items-start gap-2 pr-12 w-full mt-0.5 border-t border-purple-50 pt-1">
+                            <div className="flex items-start gap-1 flex-1 min-w-0">
+                               <span className="text-gray-400 font-bold whitespace-nowrap bg-green-50 text-green-700 px-1 rounded h-fit mt-0.5">調整方案</span> 
+                               <AutoGrowTextarea value={item.adjustment} onChange={v => updateItem('reflections', item.id, 'adjustment', v)} className="flex-1 text-green-700 font-medium min-w-0" />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                </div>
+
+              </div>
+            )}
+
+            {activeTab === 'completed' && (
+              <div className="space-y-4 mt-2">
+                
+                {completedProjects.length > 0 && (
+                  <div>
+                    <div className="bg-gray-800 text-white px-2 py-1 mb-1 rounded-sm font-bold text-sm">已完成重點項目 <span className="text-[10px] font-normal opacity-80 ml-1">({completedProjects.length})</span></div>
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-gray-100 text-gray-700 border-b-2 border-gray-300">
+                          <th className="p-1.5 w-[20%]">項目名稱與描述</th>
+                          <th className="p-1.5 w-[8%]">重要度</th>
+                          <th className="p-1.5 w-[15%]">時間記錄</th>
+                          <th className="p-1.5 w-[18%]">部門與人員</th>
+                          <th className="p-1.5 w-[30%]">目前執行狀態與備註</th>
+                          <th className="p-1.5 w-[9%] no-print text-right">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {completedProjects.map((item, idx) => {
+                          const pColor = PRIORITIES.find(p => p.level === item.priority)?.color || 'bg-gray-400 text-white';
+                          return (
+                            <tr key={item.id} id={`item-${item.id}`} className="border-b border-gray-200 hover:bg-gray-50 transition-colors item-highlight">
+                              <td className="p-1.5 align-top">
+                                <div className="font-bold text-gray-800">{idx + 1}. {item.name}</div>
+                                <div className="text-[10px] text-gray-500 mt-0.5">{item.desc}</div>
+                              </td>
+                              <td className="p-1.5 align-top"><span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${pColor}`}>{item.priority}</span></td>
+                              <td className="p-1.5 align-top text-[10px]">
+                                {item.actualCompletedDate && <div className="text-green-700 font-bold mb-0.5">實際: {item.actualCompletedDate}</div>}
+                                <div className="text-gray-400">預期: {item.estDate}</div>
+                              </td>
+                              <td className="p-1.5 align-top text-[10px] text-gray-600">
+                                <div>部門: {item.depts.join(", ") || "-"}</div>
+                                <div className="mt-0.5">人員: {item.collaborators || "-"}</div>
+                              </td>
+                              <td className="p-1.5 align-top text-[10px] text-gray-600">
+                                <div className="truncate max-w-[150px]">{item.lastStatus || "-"}</div>
+                                <div className="truncate max-w-[150px] text-gray-400 mt-0.5">{item.notes}</div>
+                              </td>
+                              <td className="p-1.5 align-top no-print text-right">
+                                <button onClick={() => updateItem('projects', item.id, 'progress', 90)} className="text-[10px] bg-orange-100 text-orange-700 px-1.5 py-1 rounded hover:bg-orange-200 transition font-bold" title="恢復為未完成">撤回</button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {completedTodos.length > 0 && (
+                  <div>
+                    <div className="bg-orange-100 text-orange-900 border-l-4 border-orange-500 px-2 py-1 mb-1 rounded-sm font-bold text-sm">已完成待辦細案 <span className="text-[10px] font-normal opacity-80 ml-1">({completedTodos.length})</span></div>
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-orange-50 text-orange-800 border-b-2 border-orange-200">
+                          <th className="p-1.5 w-[20%]">案子名稱與簡述</th>
+                          <th className="p-1.5 w-[8%]">重要度</th>
+                          <th className="p-1.5 w-[15%]">時間記錄</th>
+                          <th className="p-1.5 w-[18%]">涉及部門</th>
+                          <th className="p-1.5 w-[30%]">最新狀態與備註</th>
+                          <th className="p-1.5 w-[9%] no-print text-right">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {completedTodos.map((item, idx) => {
+                          const pColor = PRIORITIES.find(p => p.level === item.priority)?.color || 'bg-gray-400 text-white';
+                          return (
+                            <tr key={item.id} id={`item-${item.id}`} className="border-b border-orange-100 hover:bg-orange-50 transition-colors item-highlight">
+                              <td className="p-1.5 align-top">
+                                <div className="font-bold text-orange-900">{idx + 1}. {item.name}</div>
+                                <div className="text-[10px] text-gray-600 mt-0.5">{item.desc}</div>
+                              </td>
+                              <td className="p-1.5 align-top"><span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${pColor}`}>{item.priority}</span></td>
+                              <td className="p-1.5 align-top text-[10px]">
+                                {item.actualCompletedDate && <div className="text-green-700 font-bold mb-0.5">實際: {item.actualCompletedDate}</div>}
+                                <div className="text-gray-400">預期: {item.estDate}</div>
+                              </td>
+                              <td className="p-1.5 align-top text-[10px] text-gray-600">{item.depts.join(", ") || "-"}</td>
+                              <td className="p-1.5 align-top text-[10px] text-gray-600">
+                                {item.lastStatus && <div className="text-orange-800 font-bold mb-0.5">狀態: {item.lastStatus}</div>}
+                                <div>協作: {item.collaborators || "-"}</div>
+                                <div className="text-gray-400 mt-0.5">{item.notes}</div>
+                              </td>
+                              <td className="p-1.5 align-top no-print text-right">
+                                <button onClick={() => updateItem('todos', item.id, 'progress', 90)} className="text-[10px] bg-orange-100 text-orange-700 px-1.5 py-1 rounded hover:bg-orange-200 transition font-bold" title="恢復為未完成">撤回</button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {completedRoutines.length > 0 && (
+                  <div>
+                    <div className="bg-gray-200 text-gray-800 border-l-4 border-gray-500 px-2 py-1 mb-1 rounded-sm font-bold text-sm">已歸檔常規項目 <span className="text-[10px] font-normal ml-1 text-gray-500">({completedRoutines.length})</span></div>
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-gray-50 text-gray-600 border-b border-gray-300 text-[10px]">
+                          <th className="p-1.5 w-[20%]">事務名稱與描述</th>
+                          <th className="p-1.5 w-[8%]">重要度</th>
+                          <th className="p-1.5 w-[15%]">涉及部門</th>
+                          <th className="p-1.5 w-[15%]">最終狀態</th>
+                          <th className="p-1.5 w-[33%]">執行回顧/總結</th>
+                          <th className="p-1.5 w-[9%] no-print text-right">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {completedRoutines.map((item) => (
+                          <tr key={item.id} id={`item-${item.id}`} className="border-b border-gray-100 hover:bg-gray-50 transition-colors item-highlight">
+                            <td className="p-1.5 align-top">
+                              <div className="font-bold text-gray-800">{item.name}</div>
+                              <div className="text-[10px] text-gray-500 mt-0.5">{item.desc}</div>
+                            </td>
+                            <td className="p-1.5 align-top">
+                              <span className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${PRIORITIES.find(p => p.level === (item.priority||"中"))?.color || 'bg-gray-100'}`}>{item.priority || "中"}</span>
+                            </td>
+                            <td className="p-1.5 align-top text-[10px] text-gray-600">{item.depts.join(", ") || "-"}</td>
+                            <td className="p-1.5 align-top text-[10px] text-blue-700">{item.status || "-"}</td>
+                            <td className="p-1.5 align-top text-[10px] text-gray-600">
+                              {item.actualCompletedDate && <div className="text-green-700 font-bold mb-0.5">歸檔日: {item.actualCompletedDate}</div>}
+                              <div className="italic text-gray-500">{item.review || "-"}</div>
+                            </td>
+                            <td className="p-1.5 align-top no-print text-right">
+                              <button onClick={() => updateItem('routines', item.id, 'isCompleted', false)} className="text-[10px] bg-orange-100 text-orange-700 px-1.5 py-1 rounded hover:bg-orange-200 transition font-bold" title="恢復為未完成">撤回</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {completedGrowths.length > 0 && (
+                  <div>
+                    <div className="bg-blue-100 text-blue-900 border-l-4 border-blue-500 px-2 py-1 mb-1 rounded-sm font-bold text-sm">已歸檔成員成長 <span className="text-[10px] font-normal ml-1 text-blue-600">({completedGrowths.length})</span></div>
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-blue-50 text-blue-800 border-b border-blue-200 text-[10px]">
+                          <th className="p-1.5 w-[20%]">人員與階段目標</th>
+                          <th className="p-1.5 w-[20%]">近期計畫</th>
+                          <th className="p-1.5 w-[25%]">最終狀態</th>
+                          <th className="p-1.5 w-[26%]">調整方向</th>
+                          <th className="p-1.5 w-[9%] no-print text-right">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {completedGrowths.map((item) => (
+                          <tr key={item.id} id={`item-${item.id}`} className="border-b border-blue-50 hover:bg-blue-50/50 transition-colors item-highlight">
+                            <td className="p-1.5 align-top">
+                              <div className="font-bold text-blue-900">{item.targetPerson}</div>
+                              <div className="text-[10px] text-gray-500 mt-0.5">{item.direction}</div>
+                            </td>
+                            <td className="p-1.5 align-top text-[10px] text-gray-700">{item.recentPlan || "-"}</td>
+                            <td className="p-1.5 align-top text-[10px] text-green-700">
+                              {item.actualCompletedDate && <div className="text-green-800 font-bold mb-0.5">歸檔日: {item.actualCompletedDate}</div>}
+                              {item.lastEffect || "-"}
+                            </td>
+                            <td className="p-1.5 align-top text-[10px] text-orange-700">{item.adjustment || "-"}</td>
+                            <td className="p-1.5 align-top no-print text-right">
+                              <button onClick={() => updateItem('growths', item.id, 'isCompleted', false)} className="text-[10px] bg-orange-100 text-orange-700 px-1.5 py-1 rounded hover:bg-orange-200 transition font-bold" title="恢復為未完成">撤回</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {completedReflections.length > 0 && (
+                  <div>
+                    <div className="bg-purple-100 text-purple-900 border-l-4 border-purple-500 px-2 py-1 mb-1 rounded-sm font-bold text-sm">已歸檔自省總結 <span className="text-[10px] font-normal ml-1 text-purple-600">({completedReflections.length})</span></div>
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-purple-50 text-purple-800 border-b border-purple-200 text-[10px]">
+                          <th className="p-1.5 w-[20%]">關鍵詞</th>
+                          <th className="p-1.5 w-[35%]">問題解釋</th>
+                          <th className="p-1.5 w-[36%]">調整方案</th>
+                          <th className="p-1.5 w-[9%] no-print text-right">操作</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {completedReflections.map((item) => (
+                          <tr key={item.id} id={`item-${item.id}`} className="border-b border-purple-50 hover:bg-purple-50/50 transition-colors item-highlight">
+                            <td className="p-1.5 align-top font-bold text-purple-900">{item.keyword}</td>
+                            <td className="p-1.5 align-top text-[10px] text-gray-700">{item.explanation || "-"}</td>
+                            <td className="p-1.5 align-top text-[10px] text-green-700">
+                              {item.actualCompletedDate && <div className="text-green-800 font-bold mb-0.5">歸檔日: {item.actualCompletedDate}</div>}
+                              {item.adjustment || "-"}
+                            </td>
+                            <td className="p-1.5 align-top no-print text-right">
+                              <button onClick={() => updateItem('reflections', item.id, 'isCompleted', false)} className="text-[10px] bg-orange-100 text-orange-700 px-1.5 py-1 rounded hover:bg-orange-200 transition font-bold" title="恢復為未完成">撤回</button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {totalCompletedCount === 0 && (
+                  <div className="text-center text-gray-400 text-xs py-8 italic border border-dashed rounded bg-gray-50">
+                    目前無已完成 / 已歸檔項目
+                  </div>
+                )}
+              </div>
+            )}
+
+          </div>
+
+          {/* Supabase 雲端同步設定視窗 (NEW) */}
+          {showSettings && (
+            <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[200] no-print px-4">
+              <div className="bg-white p-6 rounded-xl shadow-2xl w-[450px] max-w-full transform transition-all relative">
+                <button onClick={() => setShowSettings(false)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-700">
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+                <h3 className="text-xl font-black text-gray-800 mb-2 flex items-center gap-2">
+                  <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"></path></svg>
+                  Supabase 雲端同步設定
+                </h3>
+                <p className="text-xs text-gray-500 mb-5 leading-relaxed">
+                  輸入您的 Supabase 專案資訊，即可實現跨設備資料自動同步。您的資料將與 <span className="font-bold text-gray-700">Sync ID</span> 綁定。
+                </p>
+                
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">Supabase Project URL</label>
+                    <input type="text" value={supabaseConfig.url} onChange={e => setSupabaseConfig({...supabaseConfig, url: e.target.value})} placeholder="https://xxxx.supabase.co" className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:border-blue-500 outline-none" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">Supabase Anon Key (public)</label>
+                    <input type="password" value={supabaseConfig.key} onChange={e => setSupabaseConfig({...supabaseConfig, key: e.target.value})} placeholder="eyJh..." className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:border-blue-500 outline-none" />
+                  </div>
+                  <div className="bg-blue-50 p-3 rounded-md border border-blue-100">
+                    <label className="block text-xs font-black text-blue-800 mb-1">資料同步識別碼 (Sync ID)</label>
+                    <p className="text-[10px] text-blue-600 mb-2">就像一個密碼或帳號，相同 ID 的設備會讀取相同的資料。</p>
+                    <input type="text" value={supabaseConfig.syncId} onChange={e => setSupabaseConfig({...supabaseConfig, syncId: e.target.value})} placeholder="例如：my-unique-team-id-01" className="w-full border border-blue-300 rounded-md px-3 py-2 text-sm font-bold text-blue-900 outline-none" />
+                  </div>
+                </div>
+
+                <div className="mt-6 flex flex-col sm:flex-row gap-2 justify-end">
+                  <button onClick={manualCloudLoad} className="px-4 py-2 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 rounded-md text-sm font-bold transition flex items-center justify-center gap-1">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                    從雲端強制下載
+                  </button>
+                  <button onClick={saveSupabaseConfig} className="px-6 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-bold shadow transition">
+                    儲存並開啟自動同步
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 通知與彈窗 UI (Original) */}
+          {completingItem && (
+            <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[100] no-print px-4">
+              <div className="bg-white p-5 rounded-lg shadow-2xl w-80 max-w-full transform transition-all scale-100 opacity-100">
+                <h3 className="text-lg font-black text-gray-800 mb-3 flex items-center gap-2">
+                  <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
+                  確認完成時間
+                </h3>
+                <div className="mb-4 text-xs text-gray-600 leading-relaxed">請設定此項目的實際完成或歸檔日期，該日期將作為日後追蹤與成效分析的依據：</div>
+                <input 
+                  type="date" 
+                  value={completingDate} 
+                  onChange={e => setCompletingDate(e.target.value)} 
+                  className="w-full border-2 border-gray-300 rounded px-3 py-2 mb-6 font-bold text-gray-700 focus:border-blue-500 outline-none transition" 
+                />
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setCompletingItem(null)} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-sm font-bold transition">取消</button>
+                  <button onClick={confirmComplete} className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded text-sm font-bold shadow transition">確認標記完成</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {toast && (
+            <div className={`fixed bottom-4 right-4 px-4 py-2 rounded shadow-lg text-sm text-white transition-opacity z-[110] animate-slide-up ${toast.type === 'error' ? 'bg-red-500' : 'bg-gray-900'}`}>
+              {toast.msg}
+            </div>
+          )}
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
